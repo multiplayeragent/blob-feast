@@ -384,7 +384,7 @@ function myTick(dt, now) {
     me.brain.cells = me.cells;
     if (now > me.brain.think) { me.brain.think = now + 250; thinkBot(me.brain, frameOthers, now); }
     aim.x = me.brain.target.x; aim.y = me.brain.target.y;
-  } else { aim.x = c0.x + aim.sx / cam.z; aim.y = c0.y + aim.sy / cam.z; }
+  } else { aim.x = cam.x + aim.sx / cam.z; aim.y = cam.y + aim.sy / cam.z; } // the spot under the pointer (near a wall the camera stops following, so not from the blob)
   moveCells(me.cells, aim.x, aim.y, dt, now);
   // pellets
   for (const c of me.cells) for (const { k, p } of pelletsNear(c)) {
