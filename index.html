@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Blob Feast</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #f4f1e8; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #2b2d42; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: crosshair; }
+  .hud { position: fixed; pointer-events: none; }
+  #mass { top: max(12px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left)); font-weight: 800; font-size: 24px; }
+  #mass small { display: block; font-size: 12px; font-weight: 700; opacity: .55; text-transform: uppercase; letter-spacing: .06em; }
+  #top { top: max(12px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right)); font-size: 13px; min-width: 150px; padding: 8px 12px;
+         border-radius: 12px; background: #ffffffc0; box-shadow: 0 2px 12px #0000001a; }
+  #top:empty { display: none; }
+  #top div { display: flex; justify-content: space-between; gap: 12px; } #top .me { color: #e63946; font-weight: 800; }
+  #net { bottom: max(12px, env(safe-area-inset-bottom)); left: max(14px, env(safe-area-inset-left)); font-size: 13px; opacity: .65; }
+  #toast { top: 16%; left: 0; right: 0; text-align: center; font-size: 24px; font-weight: 900; color: #e63946; text-shadow: 0 2px 0 #fff, 0 0 12px #fff; transition: opacity .5s; }
+  #hint { bottom: calc(max(12px, env(safe-area-inset-bottom)) + 30px); left: 0; right: 0; text-align: center; font-size: 15px; font-weight: 700; padding: 0 16px;
+          text-shadow: 0 1px 0 #fff; transition: opacity .8s; }
+  .touch #hint { bottom: auto; top: calc(max(12px, env(safe-area-inset-top)) + 124px); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #2b2d4255; }
+  #over[hidden], #split[hidden] { display: none; }
+  .card { width: min(340px, 88vw); max-height: 80vh; overflow: auto; padding: 22px; border-radius: 18px; background: #fffdf7; box-shadow: 0 10px 40px #0003; text-align: center; }
+  .card h2 { margin: 0 0 4px; font-size: 26px; }
+  .card h3 { margin: 14px 0 4px; font-size: 13px; color: #8a8579; text-transform: uppercase; letter-spacing: .06em; }
+  .card ol { text-align: left; margin: 0 0 16px; padding-left: 26px; font-size: 14px; min-height: 40px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; }
+  button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #e63946; color: #fff; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  #split { position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); width: 84px; height: 84px; border-radius: 50%;
+           border: 3px solid #2b2d4255; background: #ffffffaa; color: #2b2d42; font: 800 15px system-ui, sans-serif; touch-action: none; }
+  #split.on { background: #e6394655; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="mass"></div>
+<div class="hud" id="top"></div>
+<div class="hud" id="toast"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="net">Connecting…</div>
+<button id="split" hidden>SPLIT</button>
+<div id="over" hidden>
+  <div class="card">
+    <h2 id="overTitle">You were eaten</h2>
+    <div id="overScore"></div>
+    <h3>Biggest blobs, all time</h3>
+    <ol id="board"><li>Loading the leaderboard…</li></ol>
+    <button class="go" id="again">Play again</button>
+  </div>
+</div>
+<script>
+/* ═══ BLOB FEAST · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Eat smaller blobs. Split to catch them. Drop-in, 2–30 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ every number worth tuning: world, speeds, splitting, bots, food
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   BLOBS ......... moving, splitting and merging pieces (shared by players and bots)
+ *   WORLD (HOST) .. pellets and bots. Only the host writes these.
+ *   MY BLOB ....... steering, eating, getting eaten. Each player writes only its own.
+ *   DRAW .......... camera, grid, pellets, jelly blobs, effects, minimap
+ *   HUD & OVER .... mass, room top 5, game-over card, leaderboard
+ *   INPUT ......... mouse, touch, keyboard
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `b` (one packed JSON field: alive + every piece
+ *     as [id, x, y, mass]) about 12 times a second, `hb` (heartbeat) once a second, and
+ *     `n`/`h` (name, hue) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last
+ *     3s), worked out every frame. Only the host writes the shared fields `food0`…`food4`
+ *     (the pellets, 70 per field) and `bots`. A new host adopts what is in state.
+ *   - Getting eaten is the eaten player's own fact: when a piece of yours is covered by a
+ *     blob 25% bigger, YOU remove it and send "eaten" {by, m, x, y}. The eater adds the
+ *     mass to itself (the host does it for a bot eater). The host decides for bots the
+ *     same way, and sends "eaten" when a player ate a bot.
+ *   - Pellets: you grow at once and send the host "eat" {k, x, y}; the host moves that
+ *     pellet somewhere new.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "biggest-mass": each player's biggest mass, sent when you get eaten
+ *     and on a new best every 30s.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  world: 2000,          // the world is world × world px
+  seats: 10,            // bots fill the room up to this many blobs (keep it under 16: all bots share one field)
+  food: 350,            // pellets on the map (split over 5 shared fields)
+  foodMass: 2,          // mass from one pellet
+  startMass: 25,        // a new blob's mass
+  speed: 270,           // px/s at the starting mass; bigger blobs are slower
+  eatRatio: 1.25,       // a blob this many times bigger can eat you
+  minSplit: 36,         // mass a piece needs before it can split
+  maxCells: 8,          // most pieces one blob can have
+  splitSpeed: 1000,     // px/s a split piece is shot forward
+  mergeAfter: 7000,     // ms before split pieces merge back
+  decay: 0.002,         // share of mass per second big blobs (over 150) slowly lose
+  botMass: [18, 110],   // bots spawn with a mass in this range
+  botChase: [0.25, 0.6],// how keen each bot is to chase smaller blobs (0 = never, 1 = always)
+  safeFor: 3000,        // ms a new blob can't be eaten (and bots leave it alone)
+  board: "biggest-mass",// leaderboard name
+};
+const BOT_NAMES = ["Gumdrop", "Jellybean", "Blobby", "Marshmallow", "Pudding", "Bubbles", "Wobble", "Mochi", "Dumpling", "Squishy", "Tofu", "Gloop"];
+const PALETTE = [355, 20, 45, 95, 150, 180, 205, 235, 265, 295, 325];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'blob-feast',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+if (ATTRACT) Object.assign(CONFIG, { seats: 15, world: 1100, food: 220, botMass: [15, 100], botChase: [0.8, 1] });
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const join = MP.join({ ...MP_CONNECT });
+    const mp = await Promise.race([join, new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+
+const parse = (v, fallback) => { if (typeof v !== "string") return fallback; try { return JSON.parse(v); } catch { return fallback; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). */
+function shared(key, fallback) {
+  const raw = S.shared[key], m = memo.get(key);
+  if (m && m.raw === raw) return m.v;
+  const v = parse(raw, fallback);
+  memo.set(key, { raw, v });
+  return v;
+}
+let net = null;      // the room client (real or local)
+let S = { entities: { players: {} }, shared: {} }; // latest state
+const seenHb = new Map(); // sessionId -> { hb, at } on OUR clock
+
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── BLOBS ───────────────────────────────────────────────────────────────────────────
+// A blob is a list of pieces { id, x, y, m, vx, vy, mergeAt }. Players and bots share this code.
+const W = CONFIG.world;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const radius = (m) => 6 * Math.sqrt(m);
+const speedOf = (m) => Math.max(70, CONFIG.speed * Math.pow(CONFIG.startMass / m, 0.35));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const totalMass = (cells) => cells.reduce((s, c) => s + c.m, 0);
+function centerOf(cells) {
+  const m = totalMass(cells) || 1;
+  return { x: cells.reduce((s, c) => s + c.x * c.m, 0) / m, y: cells.reduce((s, c) => s + c.y * c.m, 0) / m };
+}
+
+/** Move every piece toward (tx, ty); pieces push apart until they may merge, then merge. */
+function moveCells(cells, tx, ty, dt, now) {
+  for (const c of cells) {
+    const dx = tx - c.x, dy = ty - c.y, d = Math.hypot(dx, dy) || 1;
+    const sp = speedOf(c.m) * Math.min(1, d / (radius(c.m) + 30)); // ease off near the pointer
+    c.x += (dx / d) * sp * dt + c.vx * dt; c.y += (dy / d) * sp * dt + c.vy * dt;
+    const k = Math.exp(-5 * dt); c.vx *= k; c.vy *= k;
+    if (c.m > 150) c.m -= c.m * CONFIG.decay * dt;
+    c.x = Math.max(0, Math.min(W, c.x)); c.y = Math.max(0, Math.min(W, c.y));
+  }
+  for (let i = 0; i < cells.length; i++) for (let j = cells.length - 1; j > i; j--) {
+    const a = cells[i], b = cells[j], d = dist(a, b) || 0.01, ra = radius(a.m), rb = radius(b.m);
+    if (now >= a.mergeAt && now >= b.mergeAt) {
+      if (d < Math.max(ra, rb) * 0.75) { // merge b into a
+        const m = a.m + b.m; a.x = (a.x * a.m + b.x * b.m) / m; a.y = (a.y * a.m + b.y * b.m) / m; a.m = m; cells.splice(j, 1);
+      } else if (d < ra + rb) { const pull = Math.min(d, 120 * dt); a.x += ((b.x - a.x) / d) * pull * 0.5; a.y += ((b.y - a.y) / d) * pull * 0.5; }
+    } else if (d < ra + rb) { // still too fresh: push apart
+      const push = (ra + rb - d) * Math.min(1, 8 * dt), wa = b.m / (a.m + b.m);
+      a.x -= ((b.x - a.x) / d) * push * wa; a.y -= ((b.y - a.y) / d) * push * wa;
+      b.x += ((b.x - a.x) / d) * push * (1 - wa); b.y += ((b.y - a.y) / d) * push * (1 - wa);
+    }
+  }
+}
+
+/** Every piece big enough splits in two; the new half is shot toward (tx, ty). */
+function splitCells(cells, tx, ty, now, newId) {
+  const born = [];
+  for (const c of [...cells].sort((a, b) => b.m - a.m)) {
+    if (cells.length + born.length >= CONFIG.maxCells || c.m < CONFIG.minSplit) continue;
+    const dx = tx - c.x, dy = ty - c.y, d = Math.hypot(dx, dy) || 1;
+    c.m /= 2; c.mergeAt = now + CONFIG.mergeAfter;
+    born.push({ id: newId(), x: c.x + (dx / d) * radius(c.m), y: c.y + (dy / d) * radius(c.m), m: c.m,
+      vx: (dx / d) * CONFIG.splitSpeed, vy: (dy / d) * CONFIG.splitSpeed, mergeAt: now + CONFIG.mergeAfter });
+  }
+  cells.push(...born);
+  return born.length > 0;
+}
+
+/** Add mass to the piece nearest (x, y). */
+function feed(cells, m, x, y) {
+  let best = null;
+  for (const c of cells) if (!best || dist(c, { x, y }) < dist(best, { x, y })) best = c;
+  if (best) best.m += Math.max(0, Math.min(5000, Number(m) || 0));
+}
+
+/** The biggest piece in `others` that covers `cell` (and is 25% bigger), or null. */
+function eaterOf(cell, others) {
+  let best = null;
+  for (const o of others) {
+    if (o.m < cell.m * CONFIG.eatRatio) continue;
+    if (dist(o, cell) < radius(o.m) - radius(cell.m) * 0.4 && (!best || o.m > best.m)) best = o;
+  }
+  return best;
+}
+
+// ── WORLD (HOST) ────────────────────────────────────────────────────────────────────
+const FOOD_FIELDS = 5, FOOD_PER_FIELD = Math.ceil(CONFIG.food / FOOD_FIELDS); // pellets live in shared fields food0..food4
+const randomSpot = (margin = 60) => ({ x: rnd(margin, W - margin), y: rnd(margin, W - margin) });
+const pellet = () => { const p = randomSpot(20); return [Math.round(p.x), Math.round(p.y), Math.floor(Math.random() * PALETTE.length)]; };
+const world = { food: [], bots: new Map(), wasHost: false, dirty: new Set(), lastFood: 0, lastBots: 0, lastSpawn: 0 };
+
+/** Become host: take over the pellets and bots exactly as state has them. */
+function adoptWorld() {
+  world.food = [];
+  for (let k = 0; k < FOOD_FIELDS; k++) world.food.push(parse(S.shared["food" + k], []).slice(0, FOOD_PER_FIELD));
+  for (let k = 0; k < FOOD_FIELDS; k++) while (world.food[k].length < FOOD_PER_FIELD) { world.food[k].push(pellet()); world.dirty.add(k); }
+  world.bots.clear();
+  const now = performance.now();
+  for (const b of parse(S.shared.bots, [])) {
+    world.bots.set(b.i, { id: b.i, name: b.n, hue: b.h, nextId: 100, think: 0, target: randomSpot(), respawnAt: now + 2000,
+      cells: (b.c || []).map(([id, x, y, m]) => ({ id, x, y, m, vx: 0, vy: 0, mergeAt: now + 3000 })) });
+  }
+}
+
+function spawnBot(id) {
+  const used = new Set([...world.bots.values()].map((b) => b.name)), hues = new Set([...world.bots.values()].map((b) => b.hue));
+  const at = safeSpot(), m = rnd(...CONFIG.botMass), free = PALETTE.filter((h) => !hues.has(h));
+  world.bots.set(id, { id, name: BOT_NAMES.find((n) => !used.has(n)) || "Blob", hue: (free.length ? free : PALETTE)[Math.floor(Math.random() * (free.length || PALETTE.length))],
+    nextId: 1, think: 0, target: randomSpot(), cells: [{ id: 0, x: at.x, y: at.y, m, vx: 0, vy: 0, mergeAt: 0 }], aggr: rnd(...CONFIG.botChase) });
+}
+
+/** An "eat" intent: move the pellet at (x, y) somewhere new, if it's still there and the eater is near it. */
+function applyEat(from, msg) {
+  const list = world.food[msg.k];
+  if (!list) return;
+  const i = list.findIndex((p) => p[0] === msg.x && p[1] === msg.y);
+  if (i < 0) return;
+  if (from !== "bot" && from !== net.sessionId) {
+    const cells = blobOf(from); if (!cells || !cells.some((c) => dist(c, { x: msg.x, y: msg.y }) < radius(c.m) + 120)) return; // too far: refuse
+  }
+  list[i] = pellet(); world.dirty.add(msg.k);
+}
+
+/** An "eaten" event: a piece was eaten by `msg.by`. The eater adds the mass to itself. */
+function applyEaten(msg, from) {
+  if (!msg) return;
+  burst(msg.x, msg.y, msg.hue ?? 0, 16);
+  if (msg.by === net.sessionId && me.alive) { feed(me.cells, msg.m, msg.x, msg.y); popText(`+${Math.round(msg.m)}`, msg.x, msg.y); toast(`You ate ${msg.n || "a blob"}!`); pop(260); }
+  else if (isHost() && world.bots.has(msg.by)) feed(world.bots.get(msg.by).cells, msg.m, msg.x, msg.y);
+}
+
+/** One bot's brain: run from bigger blobs, chase smaller ones (and split to catch them), else graze. */
+function thinkBot(b, others, now) {
+  const big = b.cells.reduce((a, c) => (c.m > a.m ? c : a)), at = centerOf(b.cells);
+  let threat = null, prey = null, td = 380 + radius(big.m), pd = 520 + radius(big.m);
+  for (const o of others) {
+    const d = dist(o, at);
+    if (o.m >= big.m * CONFIG.eatRatio && d < td && Math.random() > 0.15) { td = d; threat = o; }   // 15%: doesn't notice
+    if (big.m >= o.m * CONFIG.eatRatio && d < pd && !o.safe) { pd = d; prey = o; }
+  }
+  if (threat) { const d = dist(threat, at) || 1; b.target = { x: at.x + ((at.x - threat.x) / d) * 500, y: at.y + ((at.y - threat.y) / d) * 500 }; return; }
+  if (prey && Math.random() < (b.aggr || 0.6)) {
+    b.target = { x: prey.x, y: prey.y };
+    const reach = radius(big.m) * 2 + 220;
+    if (pd < reach && big.m / 2 >= prey.m * CONFIG.eatRatio && b.cells.length < 4 && Math.random() < (ATTRACT ? 0.6 : 0.3)) splitCells(b.cells, prey.x, prey.y, now, () => b.nextId++ % 1000);
+    return;
+  }
+  // graze: the nearest pellet, now and then a new direction
+  let best = null, bd = 400;
+  for (const list of world.food) for (const p of list) { const d = Math.abs(p[0] - at.x) + Math.abs(p[1] - at.y); if (d < bd) { bd = d; best = p; } }
+  b.target = best && Math.random() > 0.1 ? { x: best[0], y: best[1] } : randomSpot();
+}
+
+function hostTick(dt, now) {
+  if (!world.wasHost) { adoptWorld(); world.wasHost = true; }
+  const humans = livePlayers().length - (ATTRACT ? 1 : 0);
+  const wantBots = Math.max(0, CONFIG.seats - humans);
+  if (world.bots.size < wantBots && now - world.lastSpawn > 700) { spawnBot("b" + Math.random().toString(36).slice(2, 6)); world.lastSpawn = now; }
+  if (world.bots.size > wantBots) { const [id] = world.bots.keys(); world.bots.delete(id); }
+  const everyone = allPieces();
+  for (const b of world.bots.values()) {
+    if (!b.cells.length) { if (now > b.respawnAt) { const id = b.id; world.bots.delete(id); spawnBot(id); } continue; }
+    if (now > b.think) { b.think = now + rnd(180, 380); thinkBot(b, everyone.filter((o) => o.owner !== b.id), now); }
+    moveCells(b.cells, b.target.x, b.target.y, dt, now);
+    for (const c of b.cells) for (const { k, p } of pelletsNear(c)) { c.m += CONFIG.foodMass; applyEat("bot", { k, x: p[0], y: p[1] }); }
+    // Is a piece of this bot covered by someone bigger? The host decides that for bots.
+    for (let i = b.cells.length - 1; i >= 0; i--) {
+      const c = b.cells[i], eater = eaterOf(c, everyone.filter((o) => o.owner !== b.id));
+      if (!eater) continue;
+      b.cells.splice(i, 1);
+      const msg = { by: eater.owner, m: Math.round(c.m), x: Math.round(c.x), y: Math.round(c.y), hue: b.hue, n: b.name };
+      net.send("eaten", msg); applyEaten(msg, net.sessionId);
+      if (!b.cells.length) b.respawnAt = now + 2500;
+    }
+  }
+  if (now - world.lastBots > 100) { // ~10/s, one message for every bot
+    world.lastBots = now;
+    net.setShared("bots", JSON.stringify([...world.bots.values()].map((b) => ({ i: b.id, n: b.name, h: b.hue, c: packCells(b.cells) }))));
+  }
+  if (now - world.lastFood > 200 && world.dirty.size) { // only the pellet fields that changed, at most 5/s
+    world.lastFood = now;
+    for (const k of world.dirty) net.setShared("food" + k, JSON.stringify(world.food[k]));
+    world.dirty.clear();
+  }
+}
+
+/** A spot at least 300px from any blob bigger than a newcomer. */
+function safeSpot() {
+  const big = allPieces().filter((o) => o.m > CONFIG.startMass * 1.5);
+  for (let tries = 0; tries < 30; tries++) { const p = randomSpot(); if (big.every((o) => dist(o, p) > 300 + radius(o.m))) return p; }
+  return randomSpot();
+}
+
+// ── MY BLOB ─────────────────────────────────────────────────────────────────────────
+const me = { cells: [], alive: false, best: 0, eaten: new Map(), lastSend: 0, nextId: 1, killer: "", lastSubmit: 0, submitted: 0 };
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Wobbly", "Sticky", "Bouncy", "Gooey", "Jolly", "Zippy"][Math.floor(Math.random() * 6)] + " " + ["Jelly", "Blob", "Slime", "Bean", "Drop"][Math.floor(Math.random() * 5)];
+let myHue = PALETTE[0]; // picked on join: the first hue nobody in the room has
+const aim = { sx: 0, sy: 0, x: 0, y: 0 }; // the pointer on screen (from the center) and in the world
+
+function spawnMe() {
+  const at = safeSpot();
+  me.cells = [{ id: 0, x: at.x, y: at.y, m: ATTRACT ? 170 : CONFIG.startMass, vx: 0, vy: 0, mergeAt: 0 }];
+  me.alive = true; me.best = totalMass(me.cells); me.killer = ""; me.eaten.clear(); me.submitted = 0; me.safeUntil = performance.now() + CONFIG.safeFor;
+  cam.x = at.x; cam.y = at.y;
+  document.getElementById("over").hidden = true;
+  publish(true);
+}
+
+const packCells = (cells) => cells.map((c) => [c.id, Math.round(c.x), Math.round(c.y), Math.round(c.m)]);
+function publish(force) {
+  const now = performance.now();
+  if (!force && now - me.lastSend < 80) return; // ~12/s
+  me.lastSend = now;
+  net.me.set("b", JSON.stringify({ a: me.alive ? 1 : 0, s: isSafe() ? 1 : 0, c: me.alive ? packCells(me.cells) : [] }));
+}
+
+const isSafe = () => performance.now() < me.safeUntil;
+function split() {
+  if (!me.alive) return;
+  if (splitCells(me.cells, aim.x, aim.y, performance.now(), () => me.nextId++ % 1000)) { pop(520); publish(true); }
+}
+
+function myTick(dt, now) {
+  if (!me.alive) return;
+  const c0 = centerOf(me.cells);
+  if (ATTRACT) { // the preview drives your blob with the bot brain
+    if (!me.brain) me.brain = { id: net.sessionId, cells: me.cells, think: 0, target: c0, nextId: 500, aggr: 1 };
+    me.brain.cells = me.cells;
+    if (now > me.brain.think) { me.brain.think = now + 250; thinkBot(me.brain, frameOthers, now); }
+    aim.x = me.brain.target.x; aim.y = me.brain.target.y;
+  } else { aim.x = c0.x + aim.sx / cam.z; aim.y = c0.y + aim.sy / cam.z; }
+  moveCells(me.cells, aim.x, aim.y, dt, now);
+  // pellets
+  for (const c of me.cells) for (const { k, p } of pelletsNear(c)) {
+    const key = p[0] + "," + p[1];
+    if (me.eaten.has(key)) continue;
+    me.eaten.set(key, now); c.m += CONFIG.foodMass; // hidden on my screen until the host moves it
+    if (isHost()) applyEat(net.sessionId, { k, x: p[0], y: p[1] }); else net.send("eat", { k, x: p[0], y: p[1] });
+  }
+  // Getting eaten is MY fact: a piece covered by a bigger blob is gone, and I tell the eater.
+  for (let i = me.cells.length - 1; i >= 0 && !isSafe(); i--) {
+    const c = me.cells[i], eater = eaterOf(c, frameOthers);
+    if (!eater) continue;
+    me.cells.splice(i, 1);
+    const msg = { by: eater.owner, m: Math.round(c.m), x: Math.round(c.x), y: Math.round(c.y), hue: myHue, n: myName };
+    net.send("eaten", msg);
+    if (isHost() && world.bots.has(eater.owner)) feed(world.bots.get(eater.owner).cells, msg.m, msg.x, msg.y);
+    burst(c.x, c.y, myHue, 22); pop(140);
+    if (!me.cells.length) { me.killer = eater.name; die(); return; }
+  }
+  const mass = Math.floor(totalMass(me.cells));
+  if (mass > me.best) me.best = mass;
+  if (board && me.best > me.submitted && now - me.lastSubmit > 30000) { me.lastSubmit = now; me.submitted = me.best; board.submit(me.best).catch(() => null); }
+  publish(false);
+}
+
+function die() {
+  me.alive = false; publish(true); shake = 14;
+  if (ATTRACT) { setTimeout(spawnMe, 900); return; }
+  showOver();
+}
+
+/** Pellets touching a piece. */
+function pelletsNear(c) {
+  const out = [], r = radius(c.m), host = isHost();
+  for (let k = 0; k < FOOD_FIELDS; k++) {
+    for (const p of host ? world.food[k] || [] : shared("food" + k, [])) {
+      const dx = p[0] - c.x, dy = p[1] - c.y;
+      if (dx * dx + dy * dy < r * r) out.push({ k, p });
+    }
+  }
+  return out;
+}
+
+/** Everyone else's pieces as { owner, name, hue, key, id, x, y, m }: drawn (eased) positions. Rebuilt every frame. */
+let frameOthers = [];
+const eased = new Map(); // "owner:id" -> { x, y, m, seen }
+const parsedCache = new Map();
+function othersNow(dt, frame) {
+  const out = [];
+  const add = (owner, name, hue, cells, exact, safe) => {
+    for (const [id, x, y, m] of cells) {
+      const key = owner + ":" + id;
+      let e = eased.get(key);
+      if (!e || exact) { e = e || {}; Object.assign(e, { x, y, m }); eased.set(key, e); }
+      else { const k = 1 - Math.pow(0.0005, dt); e.x += (x - e.x) * k; e.y += (y - e.y) * k; e.m += (m - e.m) * k; }
+      e.seen = frame;
+      out.push({ owner, name, hue, key, id, x: e.x, y: e.y, m: e.m, safe });
+    }
+  };
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) continue;
+    let c = parsedCache.get(id);
+    if (!c || c.raw !== p.b) { c = { raw: p.b, b: parse(p.b, null) }; parsedCache.set(id, c); }
+    if (c.b && c.b.a && Array.isArray(c.b.c)) add(id, p.n || "Player", Number(p.h) || 200, c.b.c, false, !!c.b.s);
+  }
+  if (isHost()) for (const b of world.bots.values()) add(b.id, b.name, b.hue, packCells(b.cells), true);
+  else for (const b of shared("bots", [])) add(b.i, b.n, b.h, b.c || [], false);
+  for (const [key, e] of eased) if (e.seen !== frame) eased.delete(key);
+  return out;
+}
+/** Every piece in the room including mine (for the host's bots). */
+function allPieces() {
+  const out = frameOthers.filter((o) => !world.bots.has(o.owner));
+  for (const b of world.bots.values()) for (const c of b.cells) out.push({ owner: b.id, name: b.name, hue: b.hue, x: c.x, y: c.y, m: c.m });
+  if (me.alive) for (const c of me.cells) out.push({ owner: net.sessionId, name: myName, hue: myHue, x: c.x, y: c.y, m: c.m, safe: isSafe() });
+  return out;
+}
+const blobOf = (id) => { const p = S.entities.players[id], b = p && parse(p.b, null); return b && b.a ? b.c.map(([, x, y, m]) => ({ x, y, m })) : null; };
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let SW = 0, SH = 0, DPR = 1;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); SW = innerWidth; SH = innerHeight; cv.width = SW * DPR; cv.height = SH * DPR; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const cam = { x: W / 2, y: W / 2, z: 1 };
+let shake = 0;
+const fx = { parts: [], texts: [] };
+function burst(x, y, hue, n) {
+  for (let i = 0; i < n; i++) { const a = rnd(0, Math.PI * 2), s = rnd(80, 320); fx.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rnd(0.4, 0.8), hue, r: rnd(3, 7) }); }
+}
+const popText = (text, x, y) => fx.texts.push({ text, x, y, life: 1 });
+
+function draw(dt, t) {
+  const mine = me.alive ? me.cells : [];
+  const focus = mine.length ? centerOf(mine) : cam;
+  const zoom = Math.min(SW, SH) / (ATTRACT ? 420 : 520 + Math.sqrt(totalMass(mine) || CONFIG.startMass) * 34);
+  cam.z += (zoom - cam.z) * Math.min(1, dt * 2);
+  // follow my blob, but keep the view from drifting far past the edge of the world
+  const hw = SW / 2 / cam.z - 60, hh = SH / 2 / cam.z - 60;
+  const fx0 = hw * 2 < W ? Math.max(hw, Math.min(W - hw, focus.x)) : W / 2, fy0 = hh * 2 < W ? Math.max(hh, Math.min(W - hh, focus.y)) : W / 2;
+  cam.x += (fx0 - cam.x) * Math.min(1, dt * 6); cam.y += (fy0 - cam.y) * Math.min(1, dt * 6);
+  shake = Math.max(0, shake - dt * 40);
+  const sx = rnd(-1, 1) * shake, sy = rnd(-1, 1) * shake;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#e9e4d6"; ctx.fillRect(0, 0, SW, SH);
+  ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (SW / 2 - cam.x * cam.z + sx), DPR * (SH / 2 - cam.y * cam.z + sy));
+  // the world: paper, grid, a border
+  ctx.fillStyle = "#f6f3ea"; ctx.fillRect(0, 0, W, W);
+  ctx.strokeStyle = "#e3ddcc"; ctx.lineWidth = 2; ctx.beginPath();
+  for (let g = 0; g <= W; g += 50) { ctx.moveTo(g, 0); ctx.lineTo(g, W); ctx.moveTo(0, g); ctx.lineTo(W, g); }
+  ctx.stroke();
+  ctx.strokeStyle = "#e63946"; ctx.lineWidth = 8; ctx.strokeRect(0, 0, W, W);
+  // pellets
+  for (let k = 0; k < FOOD_FIELDS; k++) for (const p of isHost() ? world.food[k] || [] : shared("food" + k, [])) {
+    if (me.eaten.has(p[0] + "," + p[1])) continue;
+    const hue = PALETTE[p[2] % PALETTE.length], r = 6 + Math.sin(t * 3 + p[0]) * 0.8;
+    ctx.fillStyle = `hsl(${hue},80%,62%)`; ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `hsla(${hue},90%,85%,.9)`; ctx.beginPath(); ctx.arc(p[0] - 1.5, p[1] - 1.5, r * 0.4, 0, Math.PI * 2); ctx.fill();
+  }
+  // blobs, small under big
+  const all = frameOthers.map((o) => ({ ...o }));
+  for (const c of mine) all.push({ owner: net.sessionId, name: ATTRACT ? myName : "You", hue: myHue, x: c.x, y: c.y, m: c.m, mine: true, safe: isSafe() });
+  all.sort((a, b) => a.m - b.m);
+  for (const c of all) drawCell(c, t);
+  // effects
+  for (let i = fx.parts.length - 1; i >= 0; i--) {
+    const p = fx.parts[i]; p.life -= dt; if (p.life <= 0) { fx.parts.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94;
+    ctx.fillStyle = `hsla(${p.hue},80%,55%,${Math.min(1, p.life * 2)})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.textAlign = "center"; ctx.font = "900 26px system-ui, sans-serif"; ctx.lineWidth = 5; ctx.strokeStyle = "#fff";
+  for (let i = fx.texts.length - 1; i >= 0; i--) {
+    const f = fx.texts[i]; f.life -= dt; if (f.life <= 0) { fx.texts.splice(i, 1); continue; }
+    f.y -= 40 * dt; ctx.globalAlpha = Math.min(1, f.life * 2); ctx.strokeText(f.text, f.x, f.y); ctx.fillStyle = "#e63946"; ctx.fillText(f.text, f.x, f.y); ctx.globalAlpha = 1;
+  }
+  drawMinimap(all);
+}
+
+/** A wobbly jelly circle with a shine, a name and its mass. */
+function drawCell(c, t) {
+  const r = radius(c.m), n = Math.max(18, Math.min(56, Math.round(r / 2.5)));
+  ctx.beginPath();
+  for (let k = 0; k <= n; k++) {
+    const a = (k / n) * Math.PI * 2, w = 1 + Math.sin(a * 5 + t * 3 + c.x * 0.01) * 0.02 + Math.sin(a * 3 - t * 2.2 + c.y * 0.01) * 0.015;
+    const px = c.x + Math.cos(a) * r * w, py = c.y + Math.sin(a) * r * w;
+    if (k) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+  }
+  ctx.fillStyle = `hsl(${c.hue},75%,60%)`; ctx.fill();
+  ctx.lineWidth = Math.max(3, r * 0.07); ctx.strokeStyle = `hsl(${c.hue},65%,42%)`; ctx.stroke();
+  ctx.fillStyle = "#ffffff40"; ctx.beginPath(); ctx.ellipse(c.x - r * 0.35, c.y - r * 0.4, r * 0.32, r * 0.2, -0.6, 0, Math.PI * 2); ctx.fill();
+  if (c.safe) { ctx.strokeStyle = `rgba(255,255,255,${0.5 + Math.sin(t * 12) * 0.4})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(c.x, c.y, r + 7, 0, Math.PI * 2); ctx.stroke(); } // just spawned: can't be eaten
+  if (r > 16) {
+    ctx.textAlign = "center"; ctx.lineJoin = "round"; ctx.lineWidth = Math.max(3, r * 0.08); ctx.strokeStyle = "#0006"; ctx.fillStyle = "#fff";
+    ctx.font = `800 ${Math.max(11, r * 0.36)}px system-ui, sans-serif`;
+    ctx.strokeText(c.name, c.x, c.y + r * 0.08); ctx.fillText(c.name, c.x, c.y + r * 0.08);
+    if (r > 30) { ctx.font = `700 ${Math.max(10, r * 0.22)}px system-ui, sans-serif`; ctx.strokeText(Math.round(c.m), c.x, c.y + r * 0.42); ctx.fillText(Math.round(c.m), c.x, c.y + r * 0.42); }
+  }
+}
+
+function drawMinimap(all) {
+  if (ATTRACT) return;
+  const size = Math.min(120, SW * 0.26), x0 = SW - size - 14, y0 = SH - size - 14 - (touchUI ? 104 : 0), k = size / W;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#ffffffaa"; ctx.fillRect(x0, y0, size, size); ctx.strokeStyle = "#e6394688"; ctx.lineWidth = 1.5; ctx.strokeRect(x0, y0, size, size);
+  for (const c of all) {
+    ctx.fillStyle = c.mine ? "#e63946" : `hsl(${c.hue},70%,55%)`;
+    ctx.beginPath(); ctx.arc(x0 + c.x * k, y0 + c.y * k, Math.max(c.mine ? 3 : 2, radius(c.m) * k), 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Sound: a soft pop, started by the first tap or key.
+let audio = null;
+function unlockAudio() { if (!audio && !ATTRACT) { try { audio = new AudioContext(); } catch { audio = null; } } }
+function pop(freq) {
+  if (!audio) return;
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+  o.type = "sine"; o.frequency.setValueAtTime(freq, t); o.frequency.exponentialRampToValueAtTime(freq * 2.2, t + 0.08);
+  g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.16);
+}
+
+// ── HUD & OVER ──────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+let board = null, netDown = false, startedAt = 0, toastUntil = 0;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function toast(text) { if (ATTRACT) return; $("toast").textContent = text; $("toast").style.opacity = 1; toastUntil = performance.now() + 1600; }
+function hud(now) {
+  if (ATTRACT) { for (const id of ["mass", "top", "net", "hint", "toast"]) $(id).textContent = ""; return; }
+  $("mass").innerHTML = me.alive ? `${Math.floor(totalMass(me.cells))}<small>Mass</small>` : "";
+  const rows = new Map();
+  for (const o of frameOthers) rows.set(o.owner, { name: o.name, m: (rows.get(o.owner)?.m || 0) + o.m });
+  if (me.alive) rows.set(net.sessionId, { name: "You", m: totalMass(me.cells), mine: true });
+  const top = [...rows.values()].sort((a, b) => b.m - a.m).slice(0, 5);
+  $("top").innerHTML = top.map((r) => `<div class="${r.mine ? "me" : ""}"><span>${esc(r.name)}</span><span>${Math.floor(r.m)}</span></div>`).join("");
+  if (now > toastUntil) $("toast").style.opacity = 0;
+  $("hint").style.opacity = now - startedAt < 8000 ? 1 : 0;
+  $("hint").textContent = touchUI ? "Drag to move · tap SPLIT to lunge at smaller blobs" : "Move with the mouse · Space splits you toward it";
+  const n = livePlayers().length;
+  $("net").textContent = netDown ? "Reconnecting…" : net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the bots" : ""}`;
+}
+
+function showOver() {
+  $("over").hidden = false;
+  $("overTitle").textContent = me.killer ? `Eaten by ${me.killer}` : "You were eaten";
+  $("overScore").textContent = `Biggest this time: ${me.best}`;
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading the leaderboard…</li>";
+  board.submit(me.best).catch(() => null).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. You're first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = spawnMe;
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+document.body.classList.toggle("touch", touchUI);
+const setAim = (e) => { aim.sx = e.clientX - SW / 2; aim.sy = e.clientY - SH / 2; };
+cv.addEventListener("pointermove", (e) => { if (e.pointerType === "touch" && !e.isPrimary) return; setAim(e); });
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); if (e.isPrimary) setAim(e); else split(); }); // a second finger splits too
+const splitBtn = $("split");
+splitBtn.hidden = !touchUI;
+splitBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); splitBtn.classList.add("on"); split(); });
+for (const ev of ["pointerup", "pointercancel", "pointerleave"]) splitBtn.addEventListener(ev, () => splitBtn.classList.remove("on"));
+addEventListener("keydown", (e) => { unlockAudio(); if (e.key === " " && !e.repeat) { e.preventDefault(); split(); } });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0, frameNo = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; frameNo++;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixHue(); }
+  frameOthers = othersNow(dt, frameNo);
+  if (isHost()) hostTick(dt, now); else world.wasHost = false;
+  myTick(dt, now);
+  draw(dt, now / 1000);
+  if (now - lastHud > 150) { lastHud = now; hud(now); }
+  for (const [key, at] of me.eaten) if (now - at > 3000) me.eaten.delete(key); // by now the host has moved it
+  requestAnimationFrame(frame);
+}
+
+/** If someone with a lower id has my hue (the room can look empty at the moment I join), take a free one. */
+function fixHue() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId)) return;
+  const taken = new Set(others.map(([, p]) => Number(p.h)));
+  myHue = PALETTE.find((h) => !taken.has(h)) ?? myHue;
+  net.me.set("h", myHue);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("eat", (msg, from) => { if (isHost() && msg) applyEat(from, msg); });
+  net.on("eaten", (msg, from) => applyEaten(msg, from));
+  net.onDisconnect(() => { netDown = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { netDown = false; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)));
+  myHue = PALETTE.find((h) => !taken.has(h)) ?? PALETTE[Math.floor(Math.random() * PALETTE.length)];
+  net.me.set({ n: myName, h: myHue, hb: Date.now() });
+  startedAt = performance.now();
+  spawnMe();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

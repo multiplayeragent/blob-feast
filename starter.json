@@ -1,0 +1,20 @@
+{
+  "name": "Blob Feast",
+  "genre": "arcade",
+  "dim": "2D",
+  "mode": "Drop-in",
+  "players": "2–30",
+  "hook": "Eat smaller blobs. Split to catch them.",
+  "how": "Your blob drifts toward the pointer. Eat pellets to grow, and swallow any blob a quarter smaller than you. Split in two to lunge at one, then your pieces merge back after a few seconds.",
+  "controls": "Mouse or drag to move, Space or the Split button to split",
+  "uses": [
+    ["Leaderboard", "Each player's biggest mass, shown when you get eaten."],
+    ["Bots", "Bots fill the arena until enough people join."],
+    ["Live sync", "Every blob moves for everyone at once; whoever gets eaten tells the eater."]
+  ],
+  "ideas": [
+    "Add spiky mines that pop big blobs",
+    "Make it space, with planets eating moons",
+    "Add teams with a team score at the top"
+  ]
+}
