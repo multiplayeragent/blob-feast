@@ -22,7 +22,7 @@
   .touch #hint { bottom: auto; top: calc(max(12px, env(safe-area-inset-top)) + 124px); }
   #over { position: fixed; inset: 0; display: grid; place-items: center; background: #2b2d4255; }
   #over[hidden], #split[hidden] { display: none; }
-  .card { width: min(340px, 88vw); max-height: 80vh; overflow: auto; padding: 22px; border-radius: 18px; background: #fffdf7; box-shadow: 0 10px 40px #0003; text-align: center; }
+  .card { box-sizing: border-box; width: min(384px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; padding: 22px; border-radius: 18px; background: #fffdf7; box-shadow: 0 10px 40px #0003; text-align: center; }
   .card h2 { margin: 0 0 4px; font-size: 26px; }
   .card h3 { margin: 14px 0 4px; font-size: 13px; color: #8a8579; text-transform: uppercase; letter-spacing: .06em; }
   .card ol { text-align: left; margin: 0 0 16px; padding-left: 26px; font-size: 14px; min-height: 40px; }
@@ -258,7 +258,7 @@ function adoptWorld() {
 }
 
 function spawnBot(id) {
-  const used = new Set([...world.bots.values()].map((b) => b.name)), hues = new Set([...world.bots.values()].map((b) => b.hue));
+  const used = new Set([...world.bots.values()].map((b) => b.name)), hues = new Set([myHue, ...Object.values(S.entities.players || {}).map((p) => Number(p.h)), ...[...world.bots.values()].map((b) => b.hue)]);
   const at = safeSpot(), m = rnd(...CONFIG.botMass), free = PALETTE.filter((h) => !hues.has(h));
   world.bots.set(id, { id, name: BOT_NAMES.find((n) => !used.has(n)) || "Blob", hue: (free.length ? free : PALETTE)[Math.floor(Math.random() * (free.length || PALETTE.length))],
     nextId: 1, think: 0, target: randomSpot(), cells: [{ id: 0, x: at.x, y: at.y, m, vx: 0, vy: 0, mergeAt: 0 }], aggr: rnd(...CONFIG.botChase) });
@@ -444,8 +444,9 @@ function othersNow(dt, frame) {
       out.push({ owner, name, hue, key, id, x: e.x, y: e.y, m: e.m, safe });
     }
   };
+  const live = new Set(livePlayers());
   for (const [id, p] of Object.entries(S.entities.players || {})) {
-    if (id === net.sessionId) continue;
+    if (id === net.sessionId || !live.has(id)) continue; // a closed tab stays in state ~30s: skip it
     let c = parsedCache.get(id);
     if (!c || c.raw !== p.b) { c = { raw: p.b, b: parse(p.b, null) }; parsedCache.set(id, c); }
     if (c.b && c.b.a && Array.isArray(c.b.c)) add(id, p.n || "Player", Number(p.h) || 200, c.b.c, false, !!c.b.s);
@@ -615,7 +616,7 @@ document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: fal
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 let last = performance.now(), lastHb = 0, lastHud = 0, frameNo = 0;
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now; frameNo++;
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; frameNo++; // never negative: the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixHue(); }
   frameOthers = othersNow(dt, frameNo);
   if (isHost()) hostTick(dt, now); else world.wasHost = false;
@@ -626,11 +627,11 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-/** If someone with a lower id has my hue (the room can look empty at the moment I join), take a free one. */
+/** If someone with a lower id (or a bot) has my hue (the room can look empty at the moment I join), take a free one. */
 function fixHue() {
-  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
-  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId)) return;
-  const taken = new Set(others.map(([, p]) => Number(p.h)));
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), botHues = isHost() ? [...world.bots.values()].map((b) => b.hue) : shared("bots", []).map((b) => b.h);
+  if (!others.some(([id, p]) => Number(p.h) === myHue && id < net.sessionId) && !botHues.includes(myHue)) return;
+  const taken = new Set([...others.map(([, p]) => Number(p.h)), ...botHues]);
   myHue = PALETTE.find((h) => !taken.has(h)) ?? myHue;
   net.me.set("h", myHue);
 }
@@ -643,7 +644,7 @@ function fixHue() {
   net.onDisconnect(() => { netDown = true; $("net").textContent = "Reconnecting…"; });
   net.onReconnect(() => { netDown = false; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
-  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)));
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => Number(p.h)), ...parse(S.shared.bots, []).map((b) => b.h)]);
   myHue = PALETTE.find((h) => !taken.has(h)) ?? PALETTE[Math.floor(Math.random() * PALETTE.length)];
   net.me.set({ n: myName, h: myHue, hb: Date.now() });
   startedAt = performance.now();
