@@ -294,7 +294,12 @@ function thinkBot(b, others, now) {
     if (o.m >= big.m * CONFIG.eatRatio && d < td && Math.random() > 0.15) { td = d; threat = o; }   // 15%: doesn't notice
     if (big.m >= o.m * CONFIG.eatRatio && d < pd && !o.safe) { pd = d; prey = o; }
   }
-  if (threat) { const d = dist(threat, at) || 1; b.target = { x: at.x + ((at.x - threat.x) / d) * 500, y: at.y + ((at.y - threat.y) / d) * 500 }; return; }
+  if (threat) { // run straight away, but never into the wall: backed against it, slip out sideways (the side further from the threat)
+    const d = dist(threat, at) || 1, ux = (at.x - threat.x) / d, uy = (at.y - threat.y) / d, inside = (x, y) => ({ x: Math.max(80, Math.min(W - 80, x)), y: Math.max(80, Math.min(W - 80, y)) });
+    let run = inside(at.x + ux * 500, at.y + uy * 500);
+    if (dist(run, at) < 200) { const left = inside(at.x - uy * 500, at.y + ux * 500), right = inside(at.x + uy * 500, at.y - ux * 500); run = dist(left, threat) > dist(right, threat) ? left : right; }
+    b.target = run; return;
+  }
   if (prey && Math.random() < (b.aggr || 0.6)) {
     b.target = { x: prey.x, y: prey.y };
     const reach = radius(big.m) * 2 + 220;
