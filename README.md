@@ -6,7 +6,7 @@ Eat smaller blobs. Split to catch them. A multiplayer starter game from [Multipl
 
 ## How it plays
 
-Your blob drifts toward the pointer. Eat pellets to grow, and swallow any blob a quarter smaller than you. Split in two to lunge at one, then your pieces merge back after a few seconds.
+Your blob drifts toward the pointer. Eat pellets to grow, and swallow any blob at least a fifth smaller than you. Split in two to lunge at one, then your pieces merge back after a few seconds.
 
 **Controls:** Mouse or drag to move, Space or the Split button to split.
 

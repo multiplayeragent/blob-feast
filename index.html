@@ -98,6 +98,7 @@ const CONFIG = {
   splitSpeed: 1000,     // px/s a split piece is shot forward
   mergeAfter: 7000,     // ms before split pieces merge back
   decay: 0.002,         // share of mass per second big blobs (over 150) slowly lose
+  maxMass: 3000,        // no single piece grows past this (without a cap one blob ends up covering the map and eats every pellet)
   botMass: [18, 110],   // bots spawn with a mass in this range
   botChase: [0.25, 0.6],// how keen each bot is to chase smaller blobs (0 = never, 1 = always)
   safeFor: 3000,        // ms a new blob can't be eaten (and bots leave it alone)
@@ -115,7 +116,7 @@ const MP_CONNECT = {
   apiUrl: 'https://api.multiplayeragent.com',
 };
 const ATTRACT = new URLSearchParams(location.search).has("attract");
-if (ATTRACT) Object.assign(CONFIG, { seats: 15, world: 1100, food: 220, botMass: [15, 100], botChase: [0.8, 1] });
+if (ATTRACT) Object.assign(CONFIG, { seats: 15, world: 1100, food: 220, botMass: [15, 100], botChase: [0.8, 1], maxMass: 900 });
 
 /** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
 function localRoom() {
@@ -193,13 +194,14 @@ function moveCells(cells, tx, ty, dt, now) {
     c.x += (dx / d) * sp * dt + c.vx * dt; c.y += (dy / d) * sp * dt + c.vy * dt;
     const k = Math.exp(-5 * dt); c.vx *= k; c.vy *= k;
     if (c.m > 150) c.m -= c.m * CONFIG.decay * dt;
+    c.m = Math.min(CONFIG.maxMass, c.m);
     c.x = Math.max(0, Math.min(W, c.x)); c.y = Math.max(0, Math.min(W, c.y));
   }
   for (let i = 0; i < cells.length; i++) for (let j = cells.length - 1; j > i; j--) {
     const a = cells[i], b = cells[j], d = dist(a, b) || 0.01, ra = radius(a.m), rb = radius(b.m);
     if (now >= a.mergeAt && now >= b.mergeAt) {
       if (d < Math.max(ra, rb) * 0.75) { // merge b into a
-        const m = a.m + b.m; a.x = (a.x * a.m + b.x * b.m) / m; a.y = (a.y * a.m + b.y * b.m) / m; a.m = m; cells.splice(j, 1);
+        const m = a.m + b.m; a.x = (a.x * a.m + b.x * b.m) / m; a.y = (a.y * a.m + b.y * b.m) / m; a.m = Math.min(CONFIG.maxMass, m); cells.splice(j, 1);
       } else if (d < ra + rb) { const pull = Math.min(d, 120 * dt); a.x += ((b.x - a.x) / d) * pull * 0.5; a.y += ((b.y - a.y) / d) * pull * 0.5; }
     } else if (d < ra + rb) { // still too fresh: push apart
       const push = (ra + rb - d) * Math.min(1, 8 * dt), wa = b.m / (a.m + b.m);
@@ -227,8 +229,11 @@ function splitCells(cells, tx, ty, now, newId) {
 function feed(cells, m, x, y) {
   let best = null;
   for (const c of cells) if (!best || dist(c, { x, y }) < dist(best, { x, y })) best = c;
-  if (best) best.m += Math.max(0, Math.min(5000, Number(m) || 0));
+  if (best) best.m = Math.min(CONFIG.maxMass, best.m + Math.max(0, Math.min(5000, Number(m) || 0)));
 }
+
+/** Could these pieces really have eaten a piece of mass m at (x, y)? (Checks an "eaten" message before adding its mass.) */
+const couldEat = (cells, m, x, y) => totalMass(cells) >= Number(m) && cells.some((c) => dist(c, { x, y }) < radius(c.m) + 150);
 
 /** The biggest piece in `others` that covers `cell` (and is 25% bigger), or null. */
 function eaterOf(cell, others) {
@@ -263,13 +268,14 @@ function spawnBot(id) {
   const used = new Set([...world.bots.values()].map((b) => b.name)), hues = new Set([myHue, ...Object.values(S.entities.players || {}).map((p) => Number(p.h)), ...[...world.bots.values()].map((b) => b.hue)]);
   const at = safeSpot(), m = rnd(...CONFIG.botMass), free = PALETTE.filter((h) => !hues.has(h));
   world.bots.set(id, { id, name: BOT_NAMES.find((n) => !used.has(n)) || "Blob", hue: (free.length ? free : PALETTE)[Math.floor(Math.random() * (free.length || PALETTE.length))],
-    nextId: 1, think: 0, target: randomSpot(), cells: [{ id: 0, x: at.x, y: at.y, m, vx: 0, vy: 0, mergeAt: 0 }], aggr: rnd(...CONFIG.botChase) });
+    nextId: 1, think: 0, target: randomSpot(), cells: [{ id: 0, x: at.x, y: at.y, m, vx: 0, vy: 0, mergeAt: 0 }], aggr: rnd(...CONFIG.botChase),
+    safeUntil: performance.now() + CONFIG.safeFor }); // like a new player: can't be eaten at first
 }
 
 /** An "eat" intent: move the pellet at (x, y) somewhere new, if it's still there and the eater is near it. */
 function applyEat(from, msg) {
+  if (!Number.isInteger(msg.k) || msg.k < 0 || msg.k >= FOOD_FIELDS) return;
   const list = world.food[msg.k];
-  if (!list) return;
   const i = list.findIndex((p) => p[0] === msg.x && p[1] === msg.y);
   if (i < 0) return;
   if (from !== "bot" && from !== net.sessionId) {
@@ -280,10 +286,12 @@ function applyEat(from, msg) {
 
 /** An "eaten" event: a piece was eaten by `msg.by`. The eater adds the mass to itself. */
 function applyEaten(msg, from) {
-  if (!msg) return;
+  if (!msg || !Number.isFinite(msg.m) || !Number.isFinite(msg.x) || !Number.isFinite(msg.y)) return;
   burst(msg.x, msg.y, msg.hue ?? 0, 16);
-  if (msg.by === net.sessionId && me.alive) { feed(me.cells, msg.m, msg.x, msg.y); popText(`+${Math.round(msg.m)}`, msg.x, msg.y); toast(`You ate ${msg.n || "a blob"}!`); pop(260); }
-  else if (isHost() && world.bots.has(msg.by)) feed(world.bots.get(msg.by).cells, msg.m, msg.x, msg.y);
+  if (msg.by === net.sessionId && me.alive) {
+    if (!couldEat(me.cells, msg.m, msg.x, msg.y)) return; // nothing of mine was there, or it claims more mass than I have: ignore
+    feed(me.cells, msg.m, msg.x, msg.y); popText(`+${Math.round(msg.m)}`, msg.x, msg.y); toast(`You ate ${msg.n || "a blob"}!`); pop(260); }
+  else if (isHost() && world.bots.has(msg.by)) { const cells = world.bots.get(msg.by).cells; if (couldEat(cells, msg.m, msg.x, msg.y)) feed(cells, msg.m, msg.x, msg.y); }
 }
 
 /** One bot's brain: run from bigger blobs, chase smaller ones (and split to catch them), else graze. */
@@ -326,7 +334,7 @@ function hostTick(dt, now) {
     moveCells(b.cells, b.target.x, b.target.y, dt, now);
     for (const c of b.cells) for (const { k, p } of pelletsNear(c)) { c.m += CONFIG.foodMass; applyEat("bot", { k, x: p[0], y: p[1] }); }
     // Is a piece of this bot covered by someone bigger? The host decides that for bots.
-    for (let i = b.cells.length - 1; i >= 0; i--) {
+    for (let i = b.cells.length - 1; i >= 0 && !(now < b.safeUntil); i--) {
       const c = b.cells[i], eater = eaterOf(c, everyone.filter((o) => o.owner !== b.id));
       if (!eater) continue;
       b.cells.splice(i, 1);
@@ -337,7 +345,7 @@ function hostTick(dt, now) {
   }
   if (now - world.lastBots > 100) { // ~10/s, one message for every bot
     world.lastBots = now;
-    net.setShared("bots", JSON.stringify([...world.bots.values()].map((b) => ({ i: b.id, n: b.name, h: b.hue, c: packCells(b.cells) }))));
+    net.setShared("bots", JSON.stringify([...world.bots.values()].map((b) => ({ i: b.id, n: b.name, h: b.hue, c: packCells(b.cells), ...(now < b.safeUntil ? { s: 1 } : {}) }))));
   }
   if (now - world.lastFood > 200 && world.dirty.size) { // only the pellet fields that changed, at most 5/s
     world.lastFood = now;
@@ -458,15 +466,15 @@ function othersNow(dt, frame) {
     if (!c || c.raw !== p.b) { c = { raw: p.b, b: parse(p.b, null) }; parsedCache.set(id, c); }
     if (c.b && c.b.a && Array.isArray(c.b.c)) add(id, p.n || "Player", Number(p.h) || 200, c.b.c, false, !!c.b.s);
   }
-  if (isHost()) for (const b of world.bots.values()) add(b.id, b.name, b.hue, packCells(b.cells), true);
-  else for (const b of shared("bots", [])) add(b.i, b.n, b.h, b.c || [], false);
+  if (isHost()) for (const b of world.bots.values()) add(b.id, b.name, b.hue, packCells(b.cells), true, performance.now() < b.safeUntil);
+  else for (const b of shared("bots", [])) add(b.i, b.n, b.h, b.c || [], false, !!b.s);
   for (const [key, e] of eased) if (e.seen !== frame) eased.delete(key);
   return out;
 }
 /** Every piece in the room including mine (for the host's bots). */
 function allPieces() {
   const out = frameOthers.filter((o) => !world.bots.has(o.owner));
-  for (const b of world.bots.values()) for (const c of b.cells) out.push({ owner: b.id, name: b.name, hue: b.hue, x: c.x, y: c.y, m: c.m });
+  for (const b of world.bots.values()) for (const c of b.cells) out.push({ owner: b.id, name: b.name, hue: b.hue, x: c.x, y: c.y, m: c.m, safe: performance.now() < b.safeUntil });
   if (me.alive) for (const c of me.cells) out.push({ owner: net.sessionId, name: myName, hue: myHue, x: c.x, y: c.y, m: c.m, safe: isSafe() });
   return out;
 }
@@ -613,6 +621,7 @@ document.body.classList.toggle("touch", touchUI);
 const setAim = (e) => { aim.sx = e.clientX - SW / 2; aim.sy = e.clientY - SH / 2; };
 cv.addEventListener("pointermove", (e) => { if (e.pointerType === "touch" && !e.isPrimary) return; setAim(e); });
 cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); if (e.isPrimary) setAim(e); else split(); }); // a second finger splits too
+cv.addEventListener("pointerup", (e) => { if (e.pointerType === "touch" && e.isPrimary) aim.sx = aim.sy = 0; }); // finger lifted: stop where you are
 cv.addEventListener("contextmenu", (e) => e.preventDefault()); // right-click doesn't open the browser menu over the game
 const splitBtn = $("split");
 splitBtn.hidden = !touchUI;
